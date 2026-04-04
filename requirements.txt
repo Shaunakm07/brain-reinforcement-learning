@@ -1,0 +1,38 @@
+# ── Core model (tribev2 package dependencies) ─────────────────────────────
+neuralset==0.0.2
+neuraltrain==0.0.2
+torch>=2.5.1,<2.7
+torchvision>=0.20,<0.22
+numpy==2.2.6
+x-transformers==1.27.20
+einops
+PyYAML
+moviepy>=2.2.1
+huggingface_hub
+gTTS
+langdetect
+spacy
+soundfile
+Levenshtein
+julius
+transformers
+
+# ── Inference (run_image.py) ───────────────────────────────────────────────
+Pillow
+exca
+
+# ── Plotting (plot_brain.py) ───────────────────────────────────────────────
+nibabel
+matplotlib
+seaborn
+colorcet
+nilearn
+scipy
+scikit-image
+pyvista
+# pyvista  # optional: only needed for 3D interactive plots (cortical_pv.py)
+
+# ── Training ───────────────────────────────────────────────────────────────
+torchmetrics
+lightning
+wandb  # optional: only needed if logging to Weights & Biases

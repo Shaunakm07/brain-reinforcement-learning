@@ -74,6 +74,61 @@ All experiment configs are Pydantic models. Default hyperparameters live in `gri
 ### Registration pattern
 `main.py` uses wildcard imports (`from .model import *`, `from .studies import *`, etc.) to register subclasses with `neuraltrain`/`neuralset` registries. New models/studies/transforms must be importable from their respective modules.
 
+## Pipeline scripts (root of repo)
+
+| Script | Purpose |
+|---|---|
+| `run_image.py` | Run TRIBE v2 on a single image → `brain_response.npy` (n_vertices, 40) |
+| `plot_brain.py` | Whole-brain surface plots from `brain_response.npy` |
+| `brain_regions.py` | HCP MMP region utilities: extract vertices, compute per-ROI stats |
+| `plot_regions.py` | Region-level activation bar charts, timeseries, and labelled surface maps |
+
+**Typical two-step workflow:**
+```bash
+python run_image.py path/to/image.jpg          # → brain_response.npy
+python plot_brain.py brain_response.npy plots/ # → 6 surface plots
+python brain_regions.py brain_response.npy     # → ranked region table (stdout)
+python plot_regions.py brain_response.npy plots/ # → 5 region plots
+```
+
+## Brain region atlas (HCP MMP)
+
+`brain_regions.py` and `tribev2/utils.py` expose the **HCP Multi-Modal Parcellation** atlas via MNE, providing 181 bilateral cortical regions on fsaverage5.
+
+### Key functions (in `tribev2/utils.py`)
+
+| Function | What it does |
+|---|---|
+| `get_hcp_labels(mesh, hemi)` | Returns `dict[roi_name → vertex_indices]` for all 181 HCP regions |
+| `get_hcp_roi_indices(roi, hemi, mesh)` | Vertex indices for a named ROI; supports `"V*"` / `"*Belt"` wildcards |
+| `get_hcp_vertex_labels(mesh)` | Per-vertex string label for the entire surface (length 2×N) |
+| `summarize_by_roi(data, hemi, mesh)` | Mean activation per ROI from a 1-D vertex array |
+| `get_topk_rois(data, hemi, mesh, k)` | Top-k ROI names ranked by mean activation |
+
+### Convenience functions (in `brain_regions.py`)
+
+| Function | What it does |
+|---|---|
+| `list_regions()` | Sorted list of all 181 region names |
+| `get_roi_indices(roi, hemi)` | Vertex indices (wraps `get_hcp_roi_indices`) |
+| `get_roi_activation(brain, roi)` | Scalar mean activation for a region |
+| `get_roi_timeseries(brain, roi)` | Shape-(T,) mean response per TR |
+| `get_group_timeseries(brain, group)` | Same, but for a named group (e.g. `"visual_core"`) |
+| `top_regions(brain, k)` | DataFrame of top-k regions sorted by mean activation |
+| `region_summary(brain, rois)` | mean/std/max/peak_tr table for a list of regions |
+
+### Predefined region groups (`REGION_GROUPS` in `brain_regions.py`)
+
+`visual_core`, `visual_dorsal`, `visual_ventral`, `motion`, `auditory`, `language`,
+`default_mode`, `frontal_eye`, `somatosensory`, `motor`, `prefrontal`
+
+### Vertex layout (fsaverage5)
+- Total: 20 484 vertices (indices 0–20 483)
+- Left hemisphere: indices 0–10 241
+- Right hemisphere: indices 10 242–20 483
+- `hemi="both"` returns indices from both halves; `hemi="left"` / `"right"` returns
+  only the respective half with the index offset already applied.
+
 ## Custom Agent
 
 A `tribev2-architect` subagent (`.claude/agents/tribev2-architect.md`) is available for implementing or extending TriBeV2-specific components. Use it via the Agent tool when writing new model components, attention layers, or architecture extensions.
