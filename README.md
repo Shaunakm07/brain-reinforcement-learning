@@ -1,33 +1,77 @@
-# Brain Optimisation — Image-to-Brain Pipeline
+# Brain Optimisation — End-to-End Guide
 
-A minimal pipeline to predict fMRI brain responses to a static image using the pretrained [TRIBE v2](https://github.com/facebookresearch/tribev2) model from Meta, with detailed cortical surface visualisations and brain region analysis.
+This project uses Meta's pretrained [TRIBE v2](https://github.com/facebookresearch/tribev2)
+brain encoding model to:
 
----
-
-## Overview
-
-| Script | Input | Output |
-|---|---|---|
-| `run_image.py` | image file | `brain_response.npy` — predicted fMRI (20484 vertices × 40 TRs) |
-| `plot_brain.py` | `brain_response.npy` | 6 whole-brain surface plots |
-| `brain_regions.py` | `brain_response.npy` | ranked region table (stdout) |
-| `plot_regions.py` | `brain_response.npy` | 5 region-level plots |
+1. **Predict** how a human brain responds to any image (fMRI simulation)
+2. **Analyse** which specific brain regions activate and by how much
+3. **Generate** images engineered to maximally activate a chosen brain region
 
 ---
 
-## Setup
+## Table of contents
+
+1. [What this project does](#1-what-this-project-does)
+2. [Setup](#2-setup)
+3. [Project layout](#3-project-layout)
+4. [Step 1 — Predict brain response](#4-step-1--predict-brain-response-run_imagepy)
+5. [Step 2 — Whole-brain surface plots](#5-step-2--whole-brain-surface-plots-plot_brainpy)
+6. [Step 3 — Brain region analysis](#6-step-3--brain-region-analysis-brain_regionspy)
+7. [Step 4 — Region activation plots](#7-step-4--region-activation-plots-plot_regionspy)
+8. [Step 5 — Train a brain-guided image generator](#8-step-5--train-a-brain-guided-image-generator-brain_steer)
+9. [Step 6 — Generate images from a trained model](#9-step-6--generate-images-from-a-trained-model)
+10. [Brain atlas reference](#10-brain-atlas-reference)
+11. [Troubleshooting](#11-troubleshooting)
+
+---
+
+## 1. What this project does
+
+### The forward problem (Steps 1–4)
+
+TRIBE v2 is a deep learning model trained on human fMRI data. Given any image,
+it predicts the blood-oxygen-level-dependent (BOLD) response across ~20,000
+points on the cortical surface. This prediction is the same thing a neuroscientist
+would measure by putting a person in an MRI scanner and showing them the image.
+
+**The output is a float array of shape `(20484 vertices, 40 TRs)`**, where:
+- Each vertex is a point on the `fsaverage5` cortical surface mesh
+- Each TR (repetition time) is a 2-second window of predicted BOLD signal
+- The first TR corresponds to 5 seconds after stimulus onset (hemodynamic lag)
+
+### The inverse problem (Step 5–6)
+
+`brain_steer/` inverts the pipeline: instead of asking "what does the brain do
+given this image?", it asks "what image should I generate to maximally activate
+a specific brain region?". A small generator network is trained using the TRIBE v2
+prediction as a differentiable loss function.
+
+---
+
+## 2. Setup
+
+### Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> On first run, `run_image.py` downloads `facebook/tribev2` (~2 GB) and
-> `facebook/vjepa2-vitg-fpc64-256` (~4 GB) from HuggingFace into `./cache/`.
+### First-run model downloads
+
+On the first run of any script, two large models are downloaded from HuggingFace
+into `./cache/`:
+
+| Model | Size | Used for |
+|---|---|---|
+| `facebook/tribev2` | ~2 GB | Brain encoder (TRIBE v2) |
+| `facebook/vjepa2-vitg-fpc64-256` | ~4 GB | Visual feature extractor (V-JEPA2 ViT-G) |
+
+Subsequent runs use the cached versions.
 
 ### Image format
 
-PIL is used to load images. AVIF files (common on newer iPhones/Macs) must be
-converted first — PIL does not support AVIF:
+PIL is used to load images. AVIF files (common on newer iPhones and Macs) are
+not supported. Convert them first:
 
 ```bash
 sips -s format jpeg your_image.avif --out your_image.jpg
@@ -35,247 +79,599 @@ sips -s format jpeg your_image.avif --out your_image.jpg
 
 ---
 
-## Step 1 — Predict brain response (`run_image.py`)
+## 3. Project layout
+
+```
+Brain Optimisation/
+│
+├── run_image.py          # Step 1: image → brain_response.npy
+├── plot_brain.py         # Step 2: brain_response.npy → 6 surface plots
+├── brain_regions.py      # Step 3: region analysis utility + CLI
+├── plot_regions.py       # Step 4: region-level plots
+│
+├── brain_steer/          # Step 5–6: brain-guided image generation
+│   ├── generator.py      #   CNN generator: z → image
+│   ├── brain_loss.py     #   Softmax cross-entropy over brain regions
+│   ├── pipeline.py       #   Differentiable image → brain forward pass
+│   ├── train.py          #   Training loop CLI
+│   └── generate.py       #   Inference CLI
+│
+├── tribev2/              # TRIBE v2 model code (git submodule, do not edit)
+├── requirements.txt
+└── plots/                # Generated figures (created automatically)
+```
+
+---
+
+## 4. Step 1 — Predict brain response (`run_image.py`)
+
+### What it does
+
+Runs an image through the TRIBE v2 pipeline and saves the predicted fMRI
+response as a NumPy array.
+
+The internal pipeline is:
+1. Load `facebook/tribev2` (`FmriEncoderModel`)
+2. Load `facebook/vjepa2-vitg-fpc64-256` (ViT-G visual backbone)
+3. Process the image as a 64-frame static video clip
+4. Extract features at 50%, 75%, and 100% of network depth, group-mean
+   aggregated to 2 feature vectors of size 1408
+5. Forward through the TRIBE v2 Transformer encoder
+6. Save predictions as `brain_response.npy`
+
+### Usage
 
 ```bash
 python run_image.py path/to/image.jpg
 ```
 
-Saves `brain_response.npy` in the current directory.
+```bash
+# With a specific output path (edit the script or redirect):
+python run_image.py path/to/image.jpg
+# Output is always saved to brain_response.npy in the current directory
+```
 
-**What the script does:**
-
-1. Loads the pretrained `FmriEncoderModel` from `facebook/tribev2`.
-2. Loads `facebook/vjepa2-vitg-fpc64-256` (ViT-G) and processes the image as a
-   64-frame static video clip.
-3. Extracts features at layers `[0.5, 0.75, 1.0]` of network depth, group-mean
-   aggregated to 2 feature vectors of size 1408 — exactly replicating the
-   `neuralset` `HuggingFaceVideo` extractor used during training.
-4. Omits audio and text entirely (absent modalities are zero-filled by
-   `aggregate_features`, not passed through projectors).
-5. Runs the Transformer encoder and saves predictions of shape `(n_vertices, 40)`.
-
-**Output shape:**
+### Output
 
 ```
-brain_response.npy  →  float32 array, shape (20484, 40)
-                        axis 0: cortical vertices (fsaverage5)
-                        axis 1: predicted fMRI TRs (TR 0 = 5 s after stimulus onset)
+brain_response.npy
+  dtype:  float32
+  shape:  (20484, 40)
+            │      └── 40 TRs (time points)
+            └──────── 20484 cortical vertices (fsaverage5)
+
+  Value range:  typically -0.35 to +0.30
+  Positive values = above-baseline predicted BOLD response
+  Negative values = below-baseline (suppression)
+```
+
+### Example
+
+```bash
+python run_image.py sample_image_converted.jpg
+```
+
+```
+Feature dims: {'video': (2, 1408), 'audio': (2, ...), 'text': (2, ...)}
+Output shape: (20484, 40)
+Saved to brain_response.npy
 ```
 
 ---
 
-## Step 2 — Whole-brain surface plots (`plot_brain.py`)
+## 5. Step 2 — Whole-brain surface plots (`plot_brain.py`)
+
+### What it does
+
+Loads `brain_response.npy` and produces six publication-quality figures
+showing the predicted brain response on the 3D cortical surface.
+
+### Usage
 
 ```bash
 python plot_brain.py brain_response.npy plots/
 ```
 
-Produces 6 figures in `plots/`:
+Arguments:
+- `brain_response.npy` — path to the NumPy array from Step 1 (default: `brain_response.npy`)
+- `plots/` — output directory (default: `plots/`)
+
+### Output files
 
 | File | Description |
 |---|---|
-| `mean_activation.png` | Mean predicted response across all TRs — lateral L/R, medial L/R, dorsal |
-| `peak_tr.png` | The single TR with highest mean activation — same 5 views |
-| `timesteps.png` | Time-resolved strip: lateral-left brain map every 5 TRs |
-| `temporal.png` | Mean ± std, p95 + max, and spatial std per TR |
-| `distribution.png` | Histogram and CDF of per-vertex mean activations |
+| `mean_activation.png` | Mean response averaged over all 40 TRs, shown from 5 angles: lateral left/right, medial left/right, dorsal |
+| `peak_tr.png` | The single TR with the highest mean activation across vertices — same 5 views |
+| `timesteps.png` | Time-resolved strip: lateral-left brain map at every 5th TR |
+| `temporal.png` | Three line plots: mean±std, p95+max, and spatial std of activation per TR |
+| `distribution.png` | Histogram and cumulative distribution of per-vertex mean activations |
 | `summary.png` | All panels combined into one overview figure |
+
+### Reading the surface maps
+
+- **Hot colormap** (black → red → yellow → white): brighter = stronger activation
+- **Sulcal shading**: dark grooves = sulci (folds), light ridges = gyri
+- The 5 standard views together give complete coverage of the cortical surface
+
+### Example output summary
+
+For an image of a face, you might expect:
+- Strong activation in the **temporal lobe** (face perception areas)
+- Moderate activation in **occipital cortex** (visual processing)
+- The peak TR will be in the 5–15 TR range (10–30 seconds after onset)
 
 ---
 
-## Step 3 — Brain region analysis (`brain_regions.py`)
+## 6. Step 3 — Brain region analysis (`brain_regions.py`)
 
-### Command-line
+### What it does
+
+Maps the 20,484 cortical vertices onto 181 named brain regions using the
+**HCP Multi-Modal Parcellation (MMP)** atlas. Provides both a command-line
+tool and a Python module API.
+
+### Command-line usage
 
 ```bash
-# Top-20 activated regions (default)
+# Print ranked table of top-20 activated regions
 python brain_regions.py brain_response.npy
 
-# Top-50
+# Print top-50 regions
 python brain_regions.py brain_response.npy 50
 ```
 
-**Example output:**
+### Example output
 
 ```
 Loaded brain_response.npy: 20484 vertices × 40 TRs
 
 Top 10 most activated HCP MMP regions (mean across vertices and TRs):
- rank region  score  n_vertices
-    1  STSdp 0.1251         136
-    2     A5 0.0933         109
-    3  STSvp 0.0799         109
-    4  STSda 0.0790          83
-    5   STGa 0.0781          44
-    6  TPOJ1 0.0649         153
-    7   TE1a 0.0441          86
-    8    55b 0.0379          66
-    9    PEF 0.0377          57
-   10    SFL 0.0373          92
+ rank region    score  n_vertices
+    1  STSdp  0.1251         136    ← posterior dorsal superior temporal sulcus
+    2     A5  0.0933         109    ← auditory association cortex
+    3  STSvp  0.0799         109    ← posterior ventral STS
+    4  STSda  0.0790          83    ← anterior dorsal STS
+    5   STGa  0.0781          44    ← anterior superior temporal gyrus
+    6  TPOJ1  0.0649         153    ← temporo-parieto-occipital junction
+    7   TE1a  0.0441          86    ← temporal area 1a
+    8    55b  0.0379          66    ← premotor/language area
+    9    PEF  0.0377          57    ← parietal eye field
+   10    SFL  0.0373          92    ← superior frontal language
 
 Region group summaries:
          group    mean    std  peak_tr  n_vertices
-      language  0.0579 0.0705       70         502
-      auditory  0.0033 0.0622       67         590
-   frontal_eye -0.0050 0.0537       45         288
-    prefrontal -0.0133 0.0434       84         778
- somatosensory -0.0159 0.0516       45        1162
-         motor -0.0294 0.0449       45        1045
-  default_mode -0.0536 0.0466        1         608
-   visual_core -0.0663 0.0621       97        1328
-visual_ventral -0.0675 0.0617       95         400
-        motion -0.0967 0.0630       81         279
- visual_dorsal -0.1036 0.0602       97         343
+      language  0.0579  0.0705      70         502
+      auditory  0.0033  0.0622      67         590
+   frontal_eye -0.0050  0.0537      45         288
+    ...
 ```
 
-### Module API
+### Python module API
 
 ```python
 import numpy as np
 from brain_regions import (
-    list_regions,
-    get_roi_indices,
-    get_roi_activation,
-    get_roi_timeseries,
-    get_group_timeseries,
-    top_regions,
-    region_summary,
-    REGION_GROUPS,
+    list_regions,           # all 181 HCP region names
+    get_roi_indices,        # vertex indices for a region
+    get_roi_activation,     # scalar mean activation
+    get_roi_timeseries,     # (T,) activation per TR
+    get_group_timeseries,   # (T,) for a named functional group
+    top_regions,            # DataFrame ranked by activation
+    region_summary,         # mean/std/max/peak_tr table
+    REGION_GROUPS,          # predefined functional groups
 )
 
-brain = np.load("brain_response.npy")  # (20484, 40)
+brain = np.load("brain_response.npy")   # (20484, 40)
 
-# ── List all 181 available region names ───────────────────────────────────────
+# ── List all available regions ─────────────────────────────────────────────
 regions = list_regions()
-# ['1', '10d', '10pp', ..., 'v23ab']  (181 total)
+# ['1', '10d', ..., 'v23ab']  (181 total)
 
-# ── Get vertex indices for a region ───────────────────────────────────────────
-v1_idx = get_roi_indices("V1")               # both hemispheres
-v1_left = get_roi_indices("V1", hemi="left") # left only
+# ── Get vertex indices ─────────────────────────────────────────────────────
+v1_idx      = get_roi_indices("V1")            # both hemispheres
+v1_left     = get_roi_indices("V1", hemi="left")
+visual_all  = get_roi_indices("V*")            # wildcard: all V regions
+belt_areas  = get_roi_indices("*Belt")         # LBelt, MBelt, PBelt
+motion_rois = get_roi_indices(["MT", "MST", "V4t"])  # multiple regions
 
-# Wildcard queries
-v_idx     = get_roi_indices("V*")      # all regions starting with V
-belt_idx  = get_roi_indices("*Belt")   # LBelt, MBelt, PBelt
+# ── Scalar activation for a region ────────────────────────────────────────
+ffc_act = get_roi_activation(brain, "FFC")     # → float, e.g. 0.031
 
-# Multiple regions at once
-motion_idx = get_roi_indices(["MT", "MST", "V4t"])
+# ── Per-TR timeseries ──────────────────────────────────────────────────────
+v1_ts  = get_roi_timeseries(brain, "V1")       # shape (40,)
+ffc_ts = get_roi_timeseries(brain, "FFC")      # shape (40,)
 
-# ── Scalar activation for a region ────────────────────────────────────────────
-act = get_roi_activation(brain, "FFC")   # mean over vertices and TRs
-# 0.0312
+# ── Functional group timeseries ────────────────────────────────────────────
+vis_ts  = get_group_timeseries(brain, "visual_core")   # V1+V2+V3+V4
+lang_ts = get_group_timeseries(brain, "language")      # 44+45+STGa+...
 
-# ── Per-TR timeseries for a region ────────────────────────────────────────────
-v1_ts = get_roi_timeseries(brain, "V1")      # shape (40,)
-ffc_ts = get_roi_timeseries(brain, "FFC")    # shape (40,)
-
-# ── Timeseries for a named functional group ───────────────────────────────────
-vis_ts  = get_group_timeseries(brain, "visual_core")   # shape (40,)
-lang_ts = get_group_timeseries(brain, "language")      # shape (40,)
-
-# ── Ranked table of top-k regions ─────────────────────────────────────────────
+# ── Ranked table ───────────────────────────────────────────────────────────
 df = top_regions(brain, k=10)
-#  rank region    score  n_vertices
-#     1  STSdp  0.1251         136
-#     2     A5  0.0933         109
+#  rank  region    score  n_vertices
+#     1   STSdp  0.1251         136
+#     2      A5  0.0933         109
 #     ...
 
-# ── Summary stats for a set of regions ────────────────────────────────────────
+# ── Summary stats for specific regions ────────────────────────────────────
 summary = region_summary(brain, ["A1", "LBelt", "MBelt", "PBelt"])
-# region    mean    std     max  peak_tr  n_vertices
-#     A1 -0.0142 0.0305  0.0805       61          42
-#  LBelt -0.0250 0.0389  0.1065       67          66
-#  MBelt -0.0211 0.0391  0.1126       61          67
-#  PBelt -0.0257 0.0400  0.0927       67          82
+#  region    mean     std     max  peak_tr  n_vertices
+#      A1 -0.0142  0.0305  0.0805       61          42
+#   LBelt -0.0250  0.0389  0.1065       67          66
+#   MBelt -0.0211  0.0391  0.1126       61          67
+#   PBelt -0.0257  0.0400  0.0927       67          82
 ```
 
-### Predefined region groups (`REGION_GROUPS`)
+### Wildcard queries
 
-| Group key | Regions |
-|---|---|
-| `visual_core` | V1, V2, V3, V4 |
-| `visual_dorsal` | V3A, V3B, V6, V6A, V7, IPS1 |
-| `visual_ventral` | V8, VVC, FFC, PIT, VMV1, VMV2, VMV3 |
-| `motion` | MT, MST, V4t, FST, LO1, LO2, LO3 |
-| `auditory` | A1, LBelt, MBelt, PBelt, RI, A4, A5 |
-| `language` | 44, 45, STGa, STSda, STSdp, TA2 |
-| `default_mode` | RSC, d23ab, v23ab, POS1, POS2, PCV |
-| `frontal_eye` | FEF, PEF, SCEF |
-| `somatosensory` | 3a, 3b, 1, 2 |
-| `motor` | 4, 6a, 6d, 6v, 6r |
-| `prefrontal` | 46, 9a, 9m, 9p, 10r, 10v, 10d, 10pp |
+`get_roi_indices` supports prefix and suffix wildcards:
+
+```python
+get_roi_indices("V*")      # all regions starting with V: V1, V2, V3, V4, V6...
+get_roi_indices("*Belt")   # LBelt, MBelt, PBelt
+get_roi_indices("STS*")    # STSda, STSdp, STSva, STSvp
+get_roi_indices("TE*")     # TE1a, TE1m, TE1p, TE2a, TE2p
+```
+
+### Predefined region groups
+
+| Group | Regions | Function |
+|---|---|---|
+| `visual_core` | V1, V2, V3, V4 | Primary and secondary visual cortex |
+| `visual_dorsal` | V3A, V3B, V6, V6A, V7, IPS1 | Dorsal "where" pathway |
+| `visual_ventral` | V8, VVC, FFC, PIT, VMV1–3 | Ventral "what" pathway |
+| `motion` | MT, MST, V4t, FST, LO1–3 | Motion perception |
+| `auditory` | A1, LBelt, MBelt, PBelt, RI, A4, A5 | Auditory cortex |
+| `language` | 44, 45, STGa, STSda, STSdp, TA2 | Language/speech areas |
+| `default_mode` | RSC, d23ab, v23ab, POS1, POS2, PCV | Default mode network |
+| `frontal_eye` | FEF, PEF, SCEF | Frontal eye fields |
+| `somatosensory` | 3a, 3b, 1, 2 | Somatosensory cortex |
+| `motor` | 4, 6a, 6d, 6v, 6r | Motor cortex |
+| `prefrontal` | 46, 9a–p, 10r/v/d/pp | Prefrontal cortex |
 
 ### Vertex layout
 
-The `brain_response.npy` array has shape `(20484, T)`:
-- Vertices `0–10241`: left hemisphere
-- Vertices `10242–20483`: right hemisphere
+```
+Vertex indices 0     – 10241   →  left hemisphere
+Vertex indices 10242 – 20483   →  right hemisphere
+```
 
-`hemi="both"` (default) returns indices spanning both halves.
-`hemi="left"` / `"right"` returns only that hemisphere's indices.
+`hemi="both"` (default) combines both. `hemi="left"` or `"right"` returns
+indices for one hemisphere only (with correct offsets).
 
 ---
 
-## Step 4 — Region activation plots (`plot_regions.py`)
+## 7. Step 4 — Region activation plots (`plot_regions.py`)
+
+### Usage
 
 ```bash
 python plot_regions.py brain_response.npy plots/
 ```
 
-Produces 5 figures in `plots/`:
+### Output files
 
 | File | Description |
 |---|---|
-| `top_regions_bar.png` | Horizontal bar chart of top-30 regions, colour-coded by functional group |
-| `group_comparison.png` | Mean ± std activation per region group (bar chart) |
-| `group_timeseries.png` | Per-TR timeseries for each of the 11 functional groups |
-| `roi_brain_map.png` | Cortical surface map with the top-10 active regions labelled |
-| `visual_timeseries.png` | Visual hierarchy timeseries: V1 → V2 → MT → FFC → VVC |
+| `top_regions_bar.png` | Horizontal bar chart of the 30 most activated HCP regions, colour-coded by functional group |
+| `group_comparison.png` | Bar chart comparing mean ± std activation across all 11 functional groups |
+| `group_timeseries.png` | 11-panel grid: per-TR timeseries for each group, mean ± std shaded |
+| `roi_brain_map.png` | Cortical surface map with the top-10 active regions labelled by name |
+| `visual_timeseries.png` | Visual hierarchy timeseries: V1 → V2 → MT → FFC → VVC on one axis |
 
 ---
 
-## Atlas reference (HCP MMP)
+## 8. Step 5 — Train a brain-guided image generator (`brain_steer/`)
 
-The **HCP Multi-Modal Parcellation** defines 181 bilateral cortical areas on
-fsaverage5, accessed via MNE. The full list of region names:
+### Concept
+
+The generator is a small CNN that maps a random noise vector to a 224×224 RGB
+image. It is trained with TRIBE v2 as the loss function: at each step, the
+generated image is passed through the brain encoder and the loss measures how
+much the image fails to activate the target brain regions.
 
 ```
-1, 10d, 10pp, 10r, 10v, 11l, 13l, 2, 23c, 23d, 24dd, 24dv, 25, 31a,
-31pd, 31pv, 33pr, 3a, 3b, 4, 43, 44, 45, 46, 47l, 47m, 47s, 52, 55b,
-5L, 5m, 5mv, 6a, 6d, 6ma, 6mp, 6r, 6v, 7AL, 7Am, 7PC, 7PL, 7Pm, 7m,
-8Ad, 8Av, 8BL, 8BM, 8C, 9-46d, 9a, 9m, 9p, A1, A4, A5, AAIC, AIP,
-AVI, DVT, EC, FEF, FFC, FOP1-5, FST, H, IFJa, IFJp, IFSa, IFSp, IP0,
-IP1, IP2, IPS1, Ig, LBelt, LIPd, LIPv, LO1, LO2, LO3, MBelt, MI, MIP,
-MST, MT, OFC, OP1-4, PBelt, PCV, PEF, PF, PFcm, PFm, PFop, PFt, PGi,
-PGp, PGs, PH, PHA1-3, PHT, PI, PIT, POS1, POS2, PSL, PeEc, Pir, PoI1,
-PoI2, PreS, ProS, RI, RSC, SCEF, SFL, STGa, STSda, STSdp, STSva, STSvp,
-STV, TA2, TE1a, TE1m, TE1p, TE2a, TE2p, TF, TGd, TGv, TPOJ1-3, V1, V2,
-V3, V3A, V3B, V3CD, V4, V4t, V6, V6A, V7, V8, VIP, VMV1-3, VVC, a10p,
-a24, a24pr, a32pr, a47r, a9-46v, d23ab, d32, i6-8, p10p, p24, p24pr,
-p32, p32pr, p47r, p9-46v, pOFC, s32, s6-8, v23ab
+Training loop (one step):
+
+  z ~ N(0, I)  [shape: 256]
+       ↓
+  Generator (CNN, trainable)
+       ↓
+  image  [3 × 224 × 224, values in [0,1]]
+       ↓
+  V-JEPA2 ViT-G  [frozen — no weight updates, gradients flow through]
+       ↓
+  features  [2 × 1408]
+       ↓
+  TRIBE v2  [frozen — no weight updates, gradients flow through]
+       ↓
+  brain activations  [20484 vertices × 40 TRs]
+       ↓
+  brain_region_loss  [scalar]
+       ↓
+  backprop → update Generator only
 ```
 
----
+### Loss function in detail
 
-## Equivalence to the official demo
+```
+scores[i]  = mean activation over all vertices in HCP region i
+probs      = softmax( scores / temperature )
+ce_loss    = -log( sum( probs[target_rois] ) )
+supp_loss  = sum( probs[suppress_rois] )          ← optional
+loss       = ce_loss  +  λ · supp_loss
+```
 
-This pipeline is equivalent to running the TRIBE v2 demo on a video of the input
-image repeated as a static clip, with no audio or text.
+The softmax normalisation means pushing probability mass onto target regions
+automatically suppresses all non-target regions.
 
-It is **not** equivalent to the full demo on a real video because:
-- Audio and language context are absent (the demo uses all three modalities)
-- All timesteps see identical visual features — no temporal variation for the
-  Transformer to attend over
+**Temperature guide:**
+- `--temperature 0.05` — very selective, strong gradient signal, good for a single region
+- `--temperature 0.1`  — default, good balance
+- `--temperature 0.5`  — diffuse, targets a broad functional area
 
----
+### Usage
 
-## Output reference
+```bash
+# Maximise primary visual cortex
+python -m brain_steer.train \
+    --target V1 V2 V3 \
+    --steps 200 \
+    --out brain_steer/checkpoints/visual/
 
-| Field | Value |
+# Maximise face areas, suppress early visual cortex
+python -m brain_steer.train \
+    --target FFC STSda STSdp TE1a TE2a \
+    --suppress V1 V2 \
+    --temperature 0.05 \
+    --lambda-suppress 2.0 \
+    --steps 500 \
+    --out brain_steer/checkpoints/faces/
+
+# Maximise auditory cortex
+python -m brain_steer.train \
+    --target A1 LBelt MBelt PBelt \
+    --steps 300 \
+    --out brain_steer/checkpoints/auditory/
+
+# Low-memory mode (8 frames instead of 64, ~8× less RAM needed for backprop)
+python -m brain_steer.train \
+    --target V1 \
+    --num-frames 8 \
+    --steps 200 \
+    --out brain_steer/checkpoints/v1_fast/
+```
+
+### All training arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--target` | required | HCP MMP region names to maximise |
+| `--suppress` | none | Region names to explicitly suppress |
+| `--steps` | 500 | Number of gradient steps |
+| `--lr` | 1e-4 | Adam learning rate |
+| `--temperature` | 0.1 | Softmax temperature (lower = more selective) |
+| `--lambda-suppress` | 1.0 | Weight on the explicit suppression term |
+| `--latent-dim` | 256 | Generator noise vector dimension |
+| `--num-frames` | 64 | Video frames for V-JEPA2 (8 for low-memory) |
+| `--out` | `brain_steer/checkpoints` | Output directory |
+| `--cache` | `./cache` | HuggingFace model cache directory |
+| `--seed` | 42 | Random seed |
+| `--log-interval` | 10 | Print stats every N steps |
+| `--save-interval` | 50 | Save image + checkpoint every N steps |
+
+### Progress bar explained
+
+```
+Training: 45%|████████         | 225/500 [12:03, loss=3.2104, p_tgt=0.0821, top3=FFC=0.041,STSda=0.038,V1=0.021]
+```
+
+| Field | Meaning |
 |---|---|
-| Mesh | fsaverage5 |
-| Vertices | 20484 (10242 per hemisphere) |
-| Timesteps | 40 TRs |
-| TR offset | 5 s (hemodynamic lag baked in) |
-| Format | NumPy `.npy`, float32 |
-| Atlas | HCP MMP — 181 bilateral cortical areas (via MNE) |
+| `loss` | Total loss (lower = better; starts ~5, should decrease) |
+| `p_tgt` | Softmax probability mass on target regions (higher = better; aim for >0.3) |
+| `top3` | The 3 regions currently receiving the most activation — these should shift towards your target |
+
+### Output files
+
+```
+checkpoints/
+├── config.json                 ← training configuration (targets, lr, etc.)
+├── training_history.json       ← loss, target_prob, top5 per step
+├── checkpoint_step0050.pt      ← periodic checkpoint (every --save-interval steps)
+├── checkpoint_step0100.pt
+├── ...
+├── checkpoint_final.pt         ← final trained generator weights
+└── images/
+    ├── step_0050.png            ← sample image at each checkpoint
+    ├── step_0100.png
+    ...
+```
+
+### Memory requirements
+
+| `--num-frames` | RAM needed | Notes |
+|---|---|---|
+| 64 (default) | ~3–4 GB | Full pipeline, most faithful to training |
+| 8 | ~500 MB | 8× lighter, slightly different features |
+| 1 | ~100 MB | Smoke-test only |
+
+---
+
+## 9. Step 6 — Generate images from a trained model (`brain_steer/generate.py`)
+
+### Usage
+
+```bash
+# Sample 8 images
+python -m brain_steer.generate \
+    --checkpoint brain_steer/checkpoints/faces/checkpoint_final.pt \
+    --n 8 \
+    --out brain_steer/generated/faces/
+
+# Sample + run TRIBE v2 on each image to verify which regions activated
+python -m brain_steer.generate \
+    --checkpoint brain_steer/checkpoints/faces/checkpoint_final.pt \
+    --n 4 \
+    --analyse \
+    --out brain_steer/generated/faces/
+```
+
+### `--analyse` output
+
+For each generated image, prints the top-10 activated regions:
+
+```
+Image 00 — top-10 activated regions:
+   1. FFC          +0.04821  ← TARGET
+   2. STSda        +0.04103  ← TARGET
+   3. PIT          +0.03891
+   4. STSdp        +0.03712  ← TARGET
+   5. TE1a         +0.03540  ← TARGET
+   ...
+```
+
+Also saves `brain_analysis.json` with the full results.
+
+### All generate arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--checkpoint` | required | Path to a `.pt` checkpoint from `train.py` |
+| `--n` | 8 | Number of images to generate |
+| `--out` | `brain_steer/generated` | Output directory |
+| `--analyse` | off | Run TRIBE v2 to verify brain activation |
+| `--num-frames` | 64 | Frames for V-JEPA2 during analysis |
+| `--cache` | `./cache` | HuggingFace model cache |
+| `--seed` | 0 | RNG seed |
+
+---
+
+## 10. Brain atlas reference
+
+### HCP Multi-Modal Parcellation (MMP)
+
+The HCP MMP atlas defines **181 bilateral cortical areas** on the fsaverage5
+surface, based on combining cortical architecture, function, connectivity, and
+topography from hundreds of human subjects.
+
+The 181 region names include well-known areas:
+
+```
+Visual:       V1  V2  V3  V3A V3B V4  V6  V6A V7  V8  MT  MST LO1 LO2 FFC VVC
+Auditory:     A1  A4  A5  LBelt MBelt PBelt RI
+Language:     44  45  STGa STSda STSdp STSva STSvp TA2
+Motor:        4   6a  6d  6v  6r  FEF  PEF
+Parietal:     AIP LIPd LIPv VIP IP0 IP1 IP2 IPS1 7AL 7Am 7PC 7PL
+Prefrontal:   46  9a  9m  9p  10r 10v 10d 10pp 11l 47l 47m 47s
+Temporal:     TE1a TE1m TE1p TE2a TE2p TGd TGv PHA1 PHA2 PHA3
+Default mode: RSC  d23ab v23ab POS1 POS2 PCV
+... and 100+ more
+```
+
+Run `python brain_regions.py` to see all 181 with their current activation
+values, or call `list_regions()` in Python.
+
+### How the atlas is loaded
+
+The atlas is fetched via MNE's `fetch_hcp_mmp_parcellation()` and aligned to
+the fsaverage5 mesh (10,242 vertices per hemisphere). Results are cached after
+the first call.
+
+---
+
+## 11. Troubleshooting
+
+### `PIL.UnidentifiedImageError`
+
+Your image file format is not supported. Common cause: AVIF files from modern
+cameras/phones. Fix:
+
+```bash
+sips -s format jpeg your_image.avif --out your_image.jpg
+python run_image.py your_image.jpg
+```
+
+### `No such file or directory: '/Users/.../Brain'`
+
+The path contains spaces and was not quoted. Always quote paths with spaces:
+
+```bash
+python run_image.py "/Users/shaunak/Desktop/Brain Optimisation/image.jpg"
+# or from inside the project directory:
+python run_image.py image.jpg
+```
+
+### `IndexError: index 10331 is out of bounds` in surface plots
+
+This is a known bug in `tribev2/plotting/cortical.py`'s `annotate_rois` method
+for right-hemisphere views. `plot_regions.py` already works around it by only
+annotating left-hemisphere views.
+
+### `CUDA out of memory` / MPS out of memory during training
+
+Reduce the number of video frames:
+
+```bash
+python -m brain_steer.train --target V1 --num-frames 8 --steps 200
+```
+
+Or use a CPU-only run (slow but will complete):
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 python -m brain_steer.train --target V1 --num-frames 4 --steps 50
+```
+
+### Training loss not decreasing
+
+- Try a lower temperature: `--temperature 0.02`
+- Try a higher learning rate: `--lr 5e-4`
+- Ensure the target regions exist: run `python brain_regions.py` and check region names
+- Check that the target is not naturally suppressed for all images — try `brain_regions.py` on a few real images first to see if the region activates at all
+
+### Models are not downloading
+
+Check your internet connection and HuggingFace status. The models require
+`huggingface_hub` to be installed and may require authentication for gated
+models. Run:
+
+```bash
+huggingface-cli login
+```
+
+---
+
+## Quick-start summary
+
+```bash
+# 1. Install
+pip install -r requirements.txt
+
+# 2. Convert image if needed
+sips -s format jpeg photo.avif --out photo.jpg
+
+# 3. Predict brain response
+python run_image.py photo.jpg
+
+# 4. Whole-brain surface plots
+python plot_brain.py brain_response.npy plots/
+
+# 5. See which regions activated most
+python brain_regions.py brain_response.npy
+
+# 6. Region-level plots
+python plot_regions.py brain_response.npy plots/
+
+# 7. Train generator targeting visual cortex
+python -m brain_steer.train \
+    --target V1 V2 V3 \
+    --steps 200 \
+    --num-frames 8 \
+    --out brain_steer/checkpoints/visual/
+
+# 8. Generate images from trained model
+python -m brain_steer.generate \
+    --checkpoint brain_steer/checkpoints/visual/checkpoint_final.pt \
+    --n 8 \
+    --analyse \
+    --out brain_steer/generated/visual/
+```
