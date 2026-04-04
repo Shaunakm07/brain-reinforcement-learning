@@ -2,100 +2,201 @@
 
 A minimal pipeline to predict fMRI brain responses to a static image using the pretrained [TRIBE v2](https://github.com/facebookresearch/tribev2) model from Meta, with detailed cortical surface visualisations and brain region analysis.
 
-## What it does
+---
 
-**`run_image.py`** takes a single image, runs it through the TRIBE v2 brain encoder, and saves predicted fMRI activity across the cortical surface as `brain_response.npy` — shape `(~20484 vertices, 40 TRs)` on the fsaverage5 mesh.
+## Overview
 
-**`plot_brain.py`** loads that output and produces six publication-ready whole-brain surface figures.
+| Script | Input | Output |
+|---|---|---|
+| `run_image.py` | image file | `brain_response.npy` — predicted fMRI (20484 vertices × 40 TRs) |
+| `plot_brain.py` | `brain_response.npy` | 6 whole-brain surface plots |
+| `brain_regions.py` | `brain_response.npy` | ranked region table (stdout) |
+| `plot_regions.py` | `brain_response.npy` | 5 region-level plots |
 
-**`brain_regions.py`** provides utilities for extracting and analysing specific brain regions using the HCP Multi-Modal Parcellation (MMP) atlas.
+---
 
-**`plot_regions.py`** produces five region-level plots: ranked bar charts, group comparisons, timeseries per region group, a labelled brain map, and a visual hierarchy timeseries.
+## Setup
 
-## Inference pipeline (`run_image.py`)
+```bash
+pip install -r requirements.txt
+```
 
-Four steps:
+> On first run, `run_image.py` downloads `facebook/tribev2` (~2 GB) and
+> `facebook/vjepa2-vitg-fpc64-256` (~4 GB) from HuggingFace into `./cache/`.
 
-1. **Load TRIBE v2** — downloads `facebook/tribev2` from HuggingFace and loads the `FmriEncoderModel` directly, bypassing the high-level `TribeModel` abstractions.
+### Image format
 
-2. **Extract V-JEPA2 features** — loads `facebook/vjepa2-vitg-fpc64-256` (ViT-G, the actual visual backbone used in training) and processes the image as a 64-frame static clip. Hidden states are extracted at layers `[0.5, 0.75, 1.0]` of network depth and reduced to 2 feature vectors via group-mean aggregation, then mean-pooled over all spatial tokens. This exactly replicates the `neuralset` `HuggingFaceVideo` extractor used during training.
+PIL is used to load images. AVIF files (common on newer iPhones/Macs) must be
+converted first — PIL does not support AVIF:
 
-3. **Build a minimal batch** — the feature vector is replicated across all 40 output timesteps and placed into a batch dict keyed by modality. Audio and text are omitted entirely (not zeroed through projectors), so `FmriEncoderModel.aggregate_features` treats them as absent and fills them with hard zeros — identical to how the model handles missing modalities during inference.
+```bash
+sips -s format jpeg your_image.avif --out your_image.jpg
+```
 
-4. **Forward pass** — the `FmriEncoderModel` Transformer encoder runs on the features and produces predictions of shape `(1, n_vertices, 40)`. The result is saved to `brain_response.npy`.
+---
 
-## Plotting (`plot_brain.py`)
+## Step 1 — Predict brain response (`run_image.py`)
 
-Loads `brain_response.npy` and saves six figures to `plots/`:
+```bash
+python run_image.py path/to/image.jpg
+```
+
+Saves `brain_response.npy` in the current directory.
+
+**What the script does:**
+
+1. Loads the pretrained `FmriEncoderModel` from `facebook/tribev2`.
+2. Loads `facebook/vjepa2-vitg-fpc64-256` (ViT-G) and processes the image as a
+   64-frame static video clip.
+3. Extracts features at layers `[0.5, 0.75, 1.0]` of network depth, group-mean
+   aggregated to 2 feature vectors of size 1408 — exactly replicating the
+   `neuralset` `HuggingFaceVideo` extractor used during training.
+4. Omits audio and text entirely (absent modalities are zero-filled by
+   `aggregate_features`, not passed through projectors).
+5. Runs the Transformer encoder and saves predictions of shape `(n_vertices, 40)`.
+
+**Output shape:**
+
+```
+brain_response.npy  →  float32 array, shape (20484, 40)
+                        axis 0: cortical vertices (fsaverage5)
+                        axis 1: predicted fMRI TRs (TR 0 = 5 s after stimulus onset)
+```
+
+---
+
+## Step 2 — Whole-brain surface plots (`plot_brain.py`)
+
+```bash
+python plot_brain.py brain_response.npy plots/
+```
+
+Produces 6 figures in `plots/`:
 
 | File | Description |
 |---|---|
-| `mean_activation.png` | Mean response across all 40 TRs — lateral L/R, medial L/R, dorsal views |
-| `peak_tr.png` | The TR with highest mean activation — same 5 views |
-| `timesteps.png` | Time-resolved strip of lateral-left brain maps, one panel every 5 TRs |
-| `temporal.png` | Mean±std, p95+max, and spatial std plotted per TR |
+| `mean_activation.png` | Mean predicted response across all TRs — lateral L/R, medial L/R, dorsal |
+| `peak_tr.png` | The single TR with highest mean activation — same 5 views |
+| `timesteps.png` | Time-resolved strip: lateral-left brain map every 5 TRs |
+| `temporal.png` | Mean ± std, p95 + max, and spatial std per TR |
 | `distribution.png` | Histogram and CDF of per-vertex mean activations |
 | `summary.png` | All panels combined into one overview figure |
 
-## Brain region analysis (`brain_regions.py`)
+---
 
-Uses the **HCP Multi-Modal Parcellation (MMP)** atlas to map the ~20 484 fsaverage5 vertices onto 181 named cortical areas. Can be used as a command-line tool or imported as a module.
+## Step 3 — Brain region analysis (`brain_regions.py`)
 
 ### Command-line
 
 ```bash
-# Print ranked table of top-20 activated regions
+# Top-20 activated regions (default)
 python brain_regions.py brain_response.npy
 
-# Print top-50 regions
+# Top-50
 python brain_regions.py brain_response.npy 50
+```
+
+**Example output:**
+
+```
+Loaded brain_response.npy: 20484 vertices × 40 TRs
+
+Top 10 most activated HCP MMP regions (mean across vertices and TRs):
+ rank region  score  n_vertices
+    1  STSdp 0.1251         136
+    2     A5 0.0933         109
+    3  STSvp 0.0799         109
+    4  STSda 0.0790          83
+    5   STGa 0.0781          44
+    6  TPOJ1 0.0649         153
+    7   TE1a 0.0441          86
+    8    55b 0.0379          66
+    9    PEF 0.0377          57
+   10    SFL 0.0373          92
+
+Region group summaries:
+         group    mean    std  peak_tr  n_vertices
+      language  0.0579 0.0705       70         502
+      auditory  0.0033 0.0622       67         590
+   frontal_eye -0.0050 0.0537       45         288
+    prefrontal -0.0133 0.0434       84         778
+ somatosensory -0.0159 0.0516       45        1162
+         motor -0.0294 0.0449       45        1045
+  default_mode -0.0536 0.0466        1         608
+   visual_core -0.0663 0.0621       97        1328
+visual_ventral -0.0675 0.0617       95         400
+        motion -0.0967 0.0630       81         279
+ visual_dorsal -0.1036 0.0602       97         343
 ```
 
 ### Module API
 
 ```python
-from brain_regions import (
-    list_regions,           # → list of all 181 region names
-    get_roi_indices,        # → vertex indices for one or more regions
-    get_roi_activation,     # → scalar mean activation
-    get_roi_timeseries,     # → (T,) timeseries for a region
-    get_group_timeseries,   # → (T,) timeseries for a named group
-    top_regions,            # → DataFrame ranked by activation
-    region_summary,         # → mean/std/max/peak_tr table
-    REGION_GROUPS,          # → dict of predefined functional groups
-)
 import numpy as np
+from brain_regions import (
+    list_regions,
+    get_roi_indices,
+    get_roi_activation,
+    get_roi_timeseries,
+    get_group_timeseries,
+    top_regions,
+    region_summary,
+    REGION_GROUPS,
+)
 
-brain = np.load("brain_response.npy")  # (n_vertices, 40)
+brain = np.load("brain_response.npy")  # (20484, 40)
 
-# Vertex indices for V1 (both hemispheres)
-v1_idx = get_roi_indices("V1")
+# ── List all 181 available region names ───────────────────────────────────────
+regions = list_regions()
+# ['1', '10d', '10pp', ..., 'v23ab']  (181 total)
 
-# Mean activation at each TR for V1
-v1_ts = get_roi_timeseries(brain, "V1")
+# ── Get vertex indices for a region ───────────────────────────────────────────
+v1_idx = get_roi_indices("V1")               # both hemispheres
+v1_left = get_roi_indices("V1", hemi="left") # left only
 
-# All visual areas matching "V*"
-visual_idx = get_roi_indices("V*")
+# Wildcard queries
+v_idx     = get_roi_indices("V*")      # all regions starting with V
+belt_idx  = get_roi_indices("*Belt")   # LBelt, MBelt, PBelt
 
-# Top-10 most activated regions
+# Multiple regions at once
+motion_idx = get_roi_indices(["MT", "MST", "V4t"])
+
+# ── Scalar activation for a region ────────────────────────────────────────────
+act = get_roi_activation(brain, "FFC")   # mean over vertices and TRs
+# 0.0312
+
+# ── Per-TR timeseries for a region ────────────────────────────────────────────
+v1_ts = get_roi_timeseries(brain, "V1")      # shape (40,)
+ffc_ts = get_roi_timeseries(brain, "FFC")    # shape (40,)
+
+# ── Timeseries for a named functional group ───────────────────────────────────
+vis_ts  = get_group_timeseries(brain, "visual_core")   # shape (40,)
+lang_ts = get_group_timeseries(brain, "language")      # shape (40,)
+
+# ── Ranked table of top-k regions ─────────────────────────────────────────────
 df = top_regions(brain, k=10)
-print(df)
+#  rank region    score  n_vertices
+#     1  STSdp  0.1251         136
+#     2     A5  0.0933         109
+#     ...
 
-# Timeseries for the full visual cortex group
-vis_ts = get_group_timeseries(brain, "visual_core")
-
-# Summary stats for auditory cortex
+# ── Summary stats for a set of regions ────────────────────────────────────────
 summary = region_summary(brain, ["A1", "LBelt", "MBelt", "PBelt"])
+# region    mean    std     max  peak_tr  n_vertices
+#     A1 -0.0142 0.0305  0.0805       61          42
+#  LBelt -0.0250 0.0389  0.1065       67          66
+#  MBelt -0.0211 0.0391  0.1126       61          67
+#  PBelt -0.0257 0.0400  0.0927       67          82
 ```
 
-### Predefined region groups
+### Predefined region groups (`REGION_GROUPS`)
 
-| Group | Regions |
+| Group key | Regions |
 |---|---|
 | `visual_core` | V1, V2, V3, V4 |
 | `visual_dorsal` | V3A, V3B, V6, V6A, V7, IPS1 |
-| `visual_ventral` | V8, VVC, FFC, PIT, VMV1–3 |
-| `motion` | MT, MST, V4t, FST, LO1–3 |
+| `visual_ventral` | V8, VVC, FFC, PIT, VMV1, VMV2, VMV3 |
+| `motion` | MT, MST, V4t, FST, LO1, LO2, LO3 |
 | `auditory` | A1, LBelt, MBelt, PBelt, RI, A4, A5 |
 | `language` | 44, 45, STGa, STSda, STSdp, TA2 |
 | `default_mode` | RSC, d23ab, v23ab, POS1, POS2, PCV |
@@ -104,79 +205,77 @@ summary = region_summary(brain, ["A1", "LBelt", "MBelt", "PBelt"])
 | `motor` | 4, 6a, 6d, 6v, 6r |
 | `prefrontal` | 46, 9a, 9m, 9p, 10r, 10v, 10d, 10pp |
 
-### Wildcard region queries
+### Vertex layout
 
-`get_roi_indices` supports prefix (`"V*"`) and suffix (`"*Belt"`) wildcards:
+The `brain_response.npy` array has shape `(20484, T)`:
+- Vertices `0–10241`: left hemisphere
+- Vertices `10242–20483`: right hemisphere
 
-```python
-# All visual areas
-v_idx = get_roi_indices("V*")
+`hemi="both"` (default) returns indices spanning both halves.
+`hemi="left"` / `"right"` returns only that hemisphere's indices.
 
-# All auditory belt areas
-belt_idx = get_roi_indices("*Belt")
+---
 
-# Specific list of regions
-idx = get_roi_indices(["MT", "MST", "V4t"])
-```
-
-## Region plots (`plot_regions.py`)
+## Step 4 — Region activation plots (`plot_regions.py`)
 
 ```bash
 python plot_regions.py brain_response.npy plots/
 ```
+
+Produces 5 figures in `plots/`:
 
 | File | Description |
 |---|---|
-| `top_regions_bar.png` | Horizontal bar chart, top-30 regions colour-coded by group |
-| `group_comparison.png` | Mean ± std activation per region group |
+| `top_regions_bar.png` | Horizontal bar chart of top-30 regions, colour-coded by functional group |
+| `group_comparison.png` | Mean ± std activation per region group (bar chart) |
 | `group_timeseries.png` | Per-TR timeseries for each of the 11 functional groups |
-| `roi_brain_map.png` | Surface map with top-10 regions labelled on the cortex |
-| `visual_timeseries.png` | Visual hierarchy (V1 → MT → FFC) response over time |
+| `roi_brain_map.png` | Cortical surface map with the top-10 active regions labelled |
+| `visual_timeseries.png` | Visual hierarchy timeseries: V1 → V2 → MT → FFC → VVC |
 
-## Equivalence to the demo
+---
 
-This pipeline is equivalent to running the official TRIBE v2 demo on a video consisting of the input image repeated as a static clip, with no audio or text. It is **not** equivalent to the full demo on a real video, because:
+## Atlas reference (HCP MMP)
 
+The **HCP Multi-Modal Parcellation** defines 181 bilateral cortical areas on
+fsaverage5, accessed via MNE. The full list of region names:
+
+```
+1, 10d, 10pp, 10r, 10v, 11l, 13l, 2, 23c, 23d, 24dd, 24dv, 25, 31a,
+31pd, 31pv, 33pr, 3a, 3b, 4, 43, 44, 45, 46, 47l, 47m, 47s, 52, 55b,
+5L, 5m, 5mv, 6a, 6d, 6ma, 6mp, 6r, 6v, 7AL, 7Am, 7PC, 7PL, 7Pm, 7m,
+8Ad, 8Av, 8BL, 8BM, 8C, 9-46d, 9a, 9m, 9p, A1, A4, A5, AAIC, AIP,
+AVI, DVT, EC, FEF, FFC, FOP1-5, FST, H, IFJa, IFJp, IFSa, IFSp, IP0,
+IP1, IP2, IPS1, Ig, LBelt, LIPd, LIPv, LO1, LO2, LO3, MBelt, MI, MIP,
+MST, MT, OFC, OP1-4, PBelt, PCV, PEF, PF, PFcm, PFm, PFop, PFt, PGi,
+PGp, PGs, PH, PHA1-3, PHT, PI, PIT, POS1, POS2, PSL, PeEc, Pir, PoI1,
+PoI2, PreS, ProS, RI, RSC, SCEF, SFL, STGa, STSda, STSdp, STSva, STSvp,
+STV, TA2, TE1a, TE1m, TE1p, TE2a, TE2p, TF, TGd, TGv, TPOJ1-3, V1, V2,
+V3, V3A, V3B, V3CD, V4, V4t, V6, V6A, V7, V8, VIP, VMV1-3, VVC, a10p,
+a24, a24pr, a32pr, a47r, a9-46v, d23ab, d32, i6-8, p10p, p24, p24pr,
+p32, p32pr, p47r, p9-46v, pOFC, s32, s6-8, v23ab
+```
+
+---
+
+## Equivalence to the official demo
+
+This pipeline is equivalent to running the TRIBE v2 demo on a video of the input
+image repeated as a static clip, with no audio or text.
+
+It is **not** equivalent to the full demo on a real video because:
 - Audio and language context are absent (the demo uses all three modalities)
-- All timesteps see identical visual features — there is no temporal variation for the Transformer to attend over
+- All timesteps see identical visual features — no temporal variation for the
+  Transformer to attend over
 
-## Setup
+---
 
-Install all dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Full usage
-
-**Step 1 — predict brain response:**
-```bash
-python run_image.py path/to/image.jpg
-```
-
-**Step 2 — whole-brain surface plots:**
-```bash
-python plot_brain.py brain_response.npy plots/
-```
-
-**Step 3 — brain region analysis:**
-```bash
-python brain_regions.py brain_response.npy
-```
-
-**Step 4 — region activation plots:**
-```bash
-python plot_regions.py brain_response.npy plots/
-```
-
-## Output
+## Output reference
 
 | Field | Value |
 |---|---|
 | Mesh | fsaverage5 |
-| Vertices | ~20484 (10242 per hemisphere) |
+| Vertices | 20484 (10242 per hemisphere) |
 | Timesteps | 40 TRs |
-| TR offset | 5 seconds (hemodynamic lag baked in) |
+| TR offset | 5 s (hemodynamic lag baked in) |
 | Format | NumPy `.npy`, float32 |
-| Atlas | HCP MMP (181 bilateral regions via MNE) |
+| Atlas | HCP MMP — 181 bilateral cortical areas (via MNE) |
