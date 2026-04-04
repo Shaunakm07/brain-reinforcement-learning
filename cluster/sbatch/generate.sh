@@ -13,7 +13,7 @@
 # =============================================================================
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_env.sh"
+source "$HOME/brain_optimisation/cluster/activate_env.sh"
 
 CHECKPOINT="${1:?Usage: sbatch generate.sh /path/to/checkpoint.pt [--n N] [--analyse] [--run-name NAME]}"
 shift

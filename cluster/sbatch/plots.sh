@@ -12,7 +12,7 @@
 # =============================================================================
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_env.sh"
+source "$HOME/brain_optimisation/cluster/activate_env.sh"
 
 NPY_PATH="${1:?Usage: sbatch plots.sh /path/to/brain_response.npy [name]}"
 NAME="${2:-$(basename "$NPY_PATH" .npy)}"

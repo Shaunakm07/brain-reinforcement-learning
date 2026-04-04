@@ -20,7 +20,7 @@
 # =============================================================================
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_env.sh"
+source "$HOME/brain_optimisation/cluster/activate_env.sh"
 
 IMAGE_LIST="${1:?Usage: sbatch --array=0-N batch_inference.sh image_list.txt}"
 

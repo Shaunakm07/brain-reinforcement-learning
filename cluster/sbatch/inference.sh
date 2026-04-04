@@ -13,7 +13,7 @@
 # =============================================================================
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_env.sh"
+source "$HOME/brain_optimisation/cluster/activate_env.sh"
 
 IMAGE_PATH="${1:?Usage: sbatch inference.sh /path/to/image.jpg [output_name]}"
 OUTPUT_NAME="${2:-$(basename "$IMAGE_PATH" | sed 's/\.[^.]*$//')}"

@@ -26,7 +26,7 @@
 # =============================================================================
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_env.sh"
+source "$HOME/brain_optimisation/cluster/activate_env.sh"
 
 # Strip --run-name from args; pass the rest to train.py
 RUN_NAME="run_$(date +%Y%m%d_%H%M%S)"
