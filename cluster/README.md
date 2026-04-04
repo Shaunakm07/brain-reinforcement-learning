@@ -48,6 +48,35 @@ Then edit the module names near the top of `cluster/setup.sh` and
 
 ## Submitting jobs
 
+### Train on FarmShare (recommended wrapper)
+
+Use the FarmShare-focused training wrapper for validated arguments and optional
+automatic generation after training:
+
+```bash
+bash cluster/submit_train_farmshare.sh --target V1 V2 V3 --run-name visual
+```
+
+With generation and analysis:
+
+```bash
+bash cluster/submit_train_farmshare.sh \
+    --target FFC STSda STSdp \
+    --suppress V1 V2 \
+    --steps 500 \
+    --run-name faces \
+    --generate 32 --analyse
+```
+
+For advanced scheduling, you can override sbatch resources:
+
+```bash
+bash cluster/submit_train_farmshare.sh \
+    --target V1 \
+    --run-name v1_lowmem \
+    --time 12:00:00 --mem 80G --cpus 8 --gres gpu:1
+```
+
 ### Single image — full pipeline (inference + plots)
 
 ```bash

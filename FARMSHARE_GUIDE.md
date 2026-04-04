@@ -1,378 +1,251 @@
-# Stanford FarmShare — Step-by-Step Guide
+# Stanford FarmShare — Exact Training + Pipeline Runbook
 
-This guide walks you through logging into Stanford FarmShare and running the
-Brain Optimisation pipeline from scratch, assuming no prior HPC experience.
-
----
-
-## Prerequisites
-
-- A Stanford SUNet ID and password
-- Two-factor authentication (Duo) set up for your SUNet account
-- The project files on your laptop (this repository)
+This is the **authoritative, copy/paste-ready guide** for running this repo on
+Stanford FarmShare (`rice.stanford.edu`) with SLURM.
 
 ---
 
-## Part 1 — Log in to FarmShare
+## 0) What this runbook covers
 
-### Open a terminal
+- One-time setup on FarmShare
+- Data/image upload
+- Forward pipeline submission (inference + plots)
+- **Training submission for `brain_steer` (new FarmShare wrapper)**
+- Monitoring, troubleshooting, and downloading outputs
 
-- **Mac**: open the Terminal app (`/Applications/Utilities/Terminal.app`)
-- **Windows**: use Windows Terminal, PowerShell, or install [Git Bash](https://gitforwindows.org)
+If you only care about model training, jump to **Section 5**.
 
-### SSH into FarmShare
+---
+
+## 1) Login + copy code to FarmShare
+
+From your local machine:
 
 ```bash
 ssh <sunetid>@rice.stanford.edu
 ```
 
-Replace `<sunetid>` with your Stanford username (e.g. `jsmith`).
-
-You will be prompted for your password, then Duo two-factor authentication.
-After authenticating you will see a prompt like:
-
-```
-[jsmith@rice04 ~]$
-```
-
-You are now on a **login node**. Login nodes are for file management and
-submitting jobs — do not run heavy computation here.
-
-### First time only — add SSH key to avoid typing your password every time
-
-On your **laptop**, run:
+On FarmShare:
 
 ```bash
-ssh-keygen -t ed25519 -C "farmshare"   # press Enter at all prompts
-ssh-copy-id <sunetid>@rice.stanford.edu
+cd "$HOME"
+git clone <your-repo-url> brain_optimisation
+cd brain_optimisation
 ```
 
-After this, `ssh <sunetid>@rice.stanford.edu` will log you in without a
-password prompt (Duo still required unless you set up multiplexing below).
-
-### Optional — avoid repeated Duo prompts
-
-Add this to `~/.ssh/config` on your **laptop**:
-
-```
-Host farmshare
-    HostName rice.stanford.edu
-    User <sunetid>
-    ControlMaster auto
-    ControlPath ~/.ssh/cm-%r@%h:%p
-    ControlPersist 10m
-```
-
-Then `ssh farmshare` will reuse an existing connection for 10 minutes,
-skipping Duo on repeat logins.
-
----
-
-## Part 2 — Copy the project to FarmShare
-
-Run this on your **laptop** (not inside the SSH session):
+Or upload an existing local copy via `rsync`:
 
 ```bash
-cd /Users/shaunak/Desktop/Brain\ Optimisation
-
-# Copy the whole project to your FarmShare home directory
 rsync -avz --progress \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    --exclude 'cache/' \
-    --exclude 'brain_response.npy' \
-    . <sunetid>@rice.stanford.edu:~/brain_optimisation/
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  --exclude 'cache/' \
+  . <sunetid>@rice.stanford.edu:~/brain_optimisation/
 ```
-
-This copies everything except the large model cache (which will be
-re-downloaded to scratch on the cluster).
-
-To verify it arrived, from inside the SSH session:
-
-```bash
-ls ~/brain_optimisation/
-```
-
-You should see `run_image.py`, `plot_brain.py`, `brain_regions.py`, etc.
 
 ---
 
-## Part 3 — One-time environment setup
+## 2) One-time environment setup (required)
 
-Run this **once** from your SSH session on FarmShare.
-You do not need to repeat this for future jobs.
+Run once per account (or when rebuilding env):
 
 ```bash
 cd ~/brain_optimisation
 bash cluster/setup.sh
 ```
 
-This will take about 10 minutes. It:
-1. Creates a conda environment called `brain_opt`
-2. Installs all Python dependencies
-3. Downloads the HCP brain atlas (~50 MB)
-4. Creates the output folder at `/scratch/users/<sunetid>/brain_optimisation/`
-
-When it finishes you should see:
-
-```
-============================================
-Setup complete.
-Config: cluster/cluster_config.env
-Submit a job: bash cluster/submit_pipeline.sh /path/to/image.jpg
-============================================
-```
-
-### If setup fails with "conda not found"
-
-Find the correct module name and update the script:
-
-```bash
-module avail 2>&1 | grep -i -E "conda|python|miniconda"
-```
-
-Copy the exact module name shown, then edit `cluster/activate_env.sh`:
-
-```bash
-nano cluster/activate_env.sh
-# Change the module load lines to match what you found above
-# Save with Ctrl+O, exit with Ctrl+X
-```
-
-Re-run `bash cluster/setup.sh`.
+This script:
+- loads FarmShare modules,
+- creates conda env `brain_opt`,
+- installs dependencies,
+- downloads the HCP atlas,
+- creates scratch layout at `/scratch/users/$USER/brain_optimisation`,
+- writes `cluster/cluster_config.env`.
 
 ---
 
-## Part 4 — Copy an image to FarmShare
+## 3) Upload input images to scratch
 
-From your **laptop**, copy the image you want to run the model on:
+From local machine:
 
 ```bash
-scp "/Users/shaunak/Desktop/Brain Optimisation/sample_image_converted.jpg" \
-    <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/images/
+scp /path/to/image.jpg \
+  <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/images/
 ```
 
-Or copy a whole folder of images:
+On FarmShare, confirm:
 
 ```bash
-scp -r /path/to/your/images/ \
-    <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/images/
-```
-
-If the image is in AVIF format (from iPhone/Mac), convert it first on your
-laptop:
-
-```bash
-sips -s format jpeg your_image.avif --out your_image.jpg
+ls /scratch/users/$USER/brain_optimisation/images/
 ```
 
 ---
 
-## Part 5 — Run the pipeline
+## 4) Forward pipeline (image → brain response + plots)
 
-All jobs are submitted from your SSH session on FarmShare.
-
-### Option A — Full pipeline on one image (recommended for first run)
+From FarmShare:
 
 ```bash
 cd ~/brain_optimisation
-
 bash cluster/submit_pipeline.sh \
-    /scratch/users/$USER/brain_optimisation/images/sample_image_converted.jpg
+  /scratch/users/$USER/brain_optimisation/images/image.jpg
 ```
 
-This submits two SLURM jobs automatically:
-- **Job 1** (`brain-inference`) — runs TRIBE v2, ~30–60 min
-- **Job 2** (`brain-plots`) — generates all plots, starts automatically when Job 1 finishes
+This submits:
+1. `inference.sh` (GPU): produces `outputs/<image>.npy`
+2. `plots.sh` (CPU): produces region/surface plots
 
-You will see output like:
+---
 
-```
-Submitted inference : job 1234567
-Submitted plots     : job 1234568 (after 1234567)
+## 5) Training on FarmShare (recommended new command)
 
-Monitor with:
-  squeue -u $USER
-```
-
-### Option B — Also train a brain-guided image generator
+Use the new wrapper:
 
 ```bash
-bash cluster/submit_pipeline.sh \
-    /scratch/users/$USER/brain_optimisation/images/sample_image_converted.jpg \
-    --train \
-    --target FFC STSda STSdp \
-    --suppress V1 V2 \
-    --temperature 0.05 \
-    --steps 500 \
-    --run-name faces
+bash cluster/submit_train_farmshare.sh --target V1 V2 V3 --run-name visual
 ```
 
-This chains four jobs: inference → plots → train (5–8 hrs) → generate
-
-### Option C — Process many images in parallel
+### Example A — face-region objective
 
 ```bash
-# Create a list of image paths
-ls /scratch/users/$USER/brain_optimisation/images/*.jpg > image_list.txt
+bash cluster/submit_train_farmshare.sh \
+  --target FFC STSda STSdp \
+  --suppress V1 V2 \
+  --steps 500 \
+  --temperature 0.05 \
+  --run-name faces
+```
 
-bash cluster/submit_pipeline.sh --batch image_list.txt
+### Example B — lower-memory run
+
+```bash
+bash cluster/submit_train_farmshare.sh \
+  --target V1 \
+  --num-frames 8 \
+  --steps 250 \
+  --run-name v1_lowmem
+```
+
+### Example C — chain training + generation
+
+```bash
+bash cluster/submit_train_farmshare.sh \
+  --target FFC STSda STSdp \
+  --suppress V1 V2 \
+  --steps 400 \
+  --run-name faces \
+  --generate 32 --analyse
+```
+
+This submits `train.sh` and then (if `--generate N` is set) submits
+`generate.sh` with a dependency on training success.
+
+### Advanced: override FarmShare resources
+
+```bash
+bash cluster/submit_train_farmshare.sh \
+  --target V1 V2 V3 \
+  --run-name visual_long \
+  --partition gpu \
+  --time 12:00:00 \
+  --mem 80G \
+  --cpus 8 \
+  --gres gpu:1
 ```
 
 ---
 
-## Part 6 — Monitor your jobs
-
-### Check job status
+## 6) Monitoring jobs
 
 ```bash
-squeue -u $USER
+squeue -u "$USER"
 ```
 
-Output looks like:
-
-```
-  JOBID PARTITION     NAME ST       TIME  NODES REASON
-1234567       gpu   brain-i  R       8:23      1 None
-1234568       gpu   brain-p PD       0:00      1 Dependency
-```
-
-Status codes:
-- `PD` — pending (waiting to start)
-- `R`  — running
-- `CG` — completing
-- `F`  — failed
-
-`Dependency` means the job is waiting for the previous one to succeed — this
-is normal.
-
-### Watch the output live
+Follow logs:
 
 ```bash
-# Replace JOBID with the number from squeue
-tail -f /scratch/users/$USER/brain_optimisation/logs/brain-inference_1234567.out
+tail -f /scratch/users/$USER/brain_optimisation/logs/train_<JOBID>.out
 ```
 
-Press `Ctrl+C` to stop watching.
-
-### Check if a job succeeded or failed
+Check completed state + exit code:
 
 ```bash
-sacct -j 1234567 --format=JobID,JobName,State,ExitCode,Elapsed
+sacct -j <JOBID> --format=JobID,JobName,State,ExitCode,Elapsed
 ```
 
-A `State` of `COMPLETED` and `ExitCode` of `0:0` means success.
-
-### Cancel a job
+Cancel a job:
 
 ```bash
-scancel 1234567          # cancel one job
-scancel -u $USER         # cancel all your jobs
+scancel <JOBID>
 ```
 
 ---
 
-## Part 7 — Get results back to your laptop
+## 7) Output locations
 
-Once jobs complete, copy the outputs from FarmShare to your laptop.
+Everything is under:
 
-From your **laptop**:
-
-```bash
-# Copy plots
-rsync -avz --progress \
-    <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/plots/ \
-    ./farmshare_results/plots/
-
-# Copy generated images (if you ran brain_steer)
-rsync -avz --progress \
-    <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/generated/ \
-    ./farmshare_results/generated/
-
-# Copy brain response .npy files
-rsync -avz --progress \
-    <sunetid>@rice.stanford.edu:/scratch/users/<sunetid>/brain_optimisation/outputs/ \
-    ./farmshare_results/outputs/
+```text
+/scratch/users/<sunetid>/brain_optimisation/
 ```
+
+Important subfolders:
+- `outputs/` → `.npy` brain responses
+- `plots/` → surface + ROI figures
+- `checkpoints/<run-name>/` → training checkpoints + history
+- `generated/<run-name>_generated/` → sampled images (+ optional analysis)
+- `logs/` → SLURM stdout/stderr
 
 ---
 
-## Quick reference card
+## 8) Troubleshooting
 
-| Task | Command (run on FarmShare) |
-|---|---|
-| Check jobs | `squeue -u $USER` |
-| Watch logs | `tail -f /scratch/users/$USER/brain_optimisation/logs/*.out` |
-| Cancel job | `scancel <JOBID>` |
-| Disk usage | `du -sh /scratch/users/$USER/*` |
-| Interactive GPU | `salloc -p gpu --gres=gpu:1 --mem=48G --time=2:00:00` |
-| Activate env | `source ~/brain_optimisation/cluster/cluster_config.env && conda activate brain_opt` |
-| Check GPU (interactive) | `nvidia-smi` |
-| See available modules | `module avail` |
+### `conda not found` during setup
+
+Run:
+
+```bash
+module avail 2>&1 | grep -i -E 'conda|python|miniconda'
+```
+
+Then update module entries in:
+- `cluster/setup.sh`
+- `cluster/activate_env.sh`
+
+### Job pending for long time
+
+Use:
+
+```bash
+squeue -u "$USER" -o '%.10i %.9P %.20j %.8T %.10M %.10l %R'
+```
+
+Common reasons:
+- `Resources` (cluster busy)
+- `Priority` (fairshare wait)
+- `Dependency` (waiting for previous job)
+
+### GPU OOM in training
+
+Try:
+- `--num-frames 8`
+- fewer `--steps` for initial debug
+- higher job memory/time override if needed
 
 ---
 
-## Troubleshooting
-
-### "Permission denied (publickey)" when SSHing
-
-Your SSH key may not be set up. Use password login:
+## 9) Quick command index
 
 ```bash
-ssh -o PreferredAuthentications=password <sunetid>@rice.stanford.edu
-```
+# One-time setup
+bash cluster/setup.sh
 
-### Job immediately fails (State: FAILED, ExitCode: 1:0)
+# Full image pipeline
+bash cluster/submit_pipeline.sh /scratch/users/$USER/brain_optimisation/images/image.jpg
 
-Read the error log:
+# Train only (new wrapper)
+bash cluster/submit_train_farmshare.sh --target V1 V2 V3 --run-name visual
 
-```bash
-cat /scratch/users/$USER/brain_optimisation/logs/brain-inference_<JOBID>.err
-```
-
-The most common cause is a module not loading. Check `cluster/activate_env.sh`
-has the right module names.
-
-### "No space left on device"
-
-FarmShare scratch has quotas. Check what is using space:
-
-```bash
-du -sh /scratch/users/$USER/*/
-```
-
-Delete outputs you no longer need, or move completed results to your laptop.
-
-### Jobs stuck in pending for hours
-
-Check the reason:
-
-```bash
-squeue -u $USER -o "%.10i %.9P %.8T %R"
-```
-
-- `Resources` — all GPU nodes are in use; wait or try late evening/weekends
-- `ReqNodeNotAvail` — requested resources unavailable; try removing the
-  `--constraint` line from the sbatch script
-
-### HuggingFace download fails inside a job
-
-Pre-download models from the login node (which has internet access):
-
-```bash
-source ~/brain_optimisation/cluster/cluster_config.env
-conda activate brain_opt
-python -c "
-from transformers import AutoModel, AutoVideoProcessor
-import os
-AutoVideoProcessor.from_pretrained(
-    'facebook/vjepa2-vitg-fpc64-256',
-    cache_dir=os.environ['HF_HOME']
-)
-AutoModel.from_pretrained(
-    'facebook/vjepa2-vitg-fpc64-256',
-    cache_dir=os.environ['HF_HOME']
-)
-print('Models cached successfully.')
-"
+# Train + generate + analyse
+bash cluster/submit_train_farmshare.sh --target FFC STSda STSdp --run-name faces --generate 16 --analyse
 ```
