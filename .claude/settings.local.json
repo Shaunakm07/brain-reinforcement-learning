@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"from neuralset.dataloader import SegmentData; help\\(SegmentData\\)\")",
-      "Bash(pip show:*)"
-    ]
-  }
-}
